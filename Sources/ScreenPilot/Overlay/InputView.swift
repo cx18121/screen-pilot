@@ -1,8 +1,10 @@
 import SwiftUI
 
 struct InputView: View {
+    let placeholder: String
     let onSubmit: (String) -> Void
     let onCancel: () -> Void
+    let onClearHistory: () -> Void
 
     @State private var text: String = ""
     @FocusState private var focused: Bool
@@ -13,12 +15,24 @@ struct InputView: View {
                 .font(.system(size: 18, weight: .medium))
                 .foregroundStyle(.white.opacity(0.7))
 
-            TextField("Ask about your screen…", text: $text)
+            TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 16))
                 .foregroundStyle(.white)
                 .focused($focused)
                 .onSubmit(submit)
+
+            // Invisible button bound to ⌘K that clears the conversation.
+            // Rendered zero-size so it doesn't shift the layout but still
+            // participates in keyboard shortcut routing.
+            Button(action: {
+                text = ""
+                onClearHistory()
+            }) {
+                Color.clear.frame(width: 0, height: 0)
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("k", modifiers: [.command])
 
             if !text.isEmpty {
                 Text("↵")

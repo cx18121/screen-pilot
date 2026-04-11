@@ -10,8 +10,20 @@ final class AssistantCoordinator {
     private var inputController: InputOverlayController?
     private var responseController: ResponseOverlayController?
 
-    // Reserved for future session memory. V1 stays empty per spec.
+    // Conversation memory across ⌘⇧Space presses. Stores text-only turns —
+    // prior screenshots are dropped on purpose, because every new press sends
+    // a fresh screenshot and keeping old ones would balloon the request.
     private var history: [ChatMessage] = []
+    private var lastActivity: Date?
+
+    // If the user hasn't used the app in this long, the next trigger starts a
+    // fresh conversation. Keeps the model from anchoring on stale context
+    // from something you asked an hour ago.
+    private let idleResetInterval: TimeInterval = 600
+
+    // Cap on stored turns (user + assistant each count as one). Beyond this
+    // we drop the oldest. 20 gives ~10 Q&A pairs.
+    private let historyCap = 20
 
     func trigger() {
         // If an overlay is already visible, dismiss it instead of stacking.
@@ -19,6 +31,8 @@ final class AssistantCoordinator {
             dismissAll()
             return
         }
+
+        pruneIdleHistory()
 
         let capture: ScreenshotCapture.CaptureResult
         do {
@@ -32,13 +46,22 @@ final class AssistantCoordinator {
     }
 
     private func presentInput(for capture: ScreenshotCapture.CaptureResult) {
+        let placeholder = history.isEmpty
+            ? "Ask about your screen…"
+            : "Follow up… (⌘K to start over)"
+
         let controller = InputOverlayController(
+            placeholder: placeholder,
             onSubmit: { [weak self] question in
                 self?.handleSubmission(question: question, capture: capture)
             },
             onCancel: { [weak self] in
                 self?.inputController?.close()
                 self?.inputController = nil
+            },
+            onClearHistory: { [weak self] in
+                self?.history.removeAll()
+                self?.lastActivity = nil
             }
         )
         inputController = controller
@@ -69,24 +92,60 @@ final class AssistantCoordinator {
             screenText: screenText
         )
 
+        let historySnapshot = history
+
         Task { [weak self] in
             guard let self = self else { return }
+            var accumulated = ""
             do {
-                let answer = try await self.api.ask(
+                let stream = self.api.askStream(
                     question: question,
                     imageData: imageData,
                     imageMediaType: "image/jpeg",
-                    history: self.history,
+                    history: historySnapshot,
                     context: context
                 )
+                for try await delta in stream {
+                    accumulated += delta
+                    let snapshot = accumulated
+                    await MainActor.run {
+                        response.update(text: snapshot)
+                    }
+                }
                 await MainActor.run {
-                    response.update(text: answer)
+                    self.appendToHistory(question: question, answer: accumulated)
                 }
             } catch {
                 await MainActor.run {
-                    response.update(text: error.localizedDescription, isError: true)
+                    // If we got a partial response before the error, keep it
+                    // visible and append the failure reason rather than wiping
+                    // the panel.
+                    if accumulated.isEmpty {
+                        response.update(text: error.localizedDescription, isError: true)
+                    } else {
+                        let combined = accumulated + "\n\n---\n*Stream ended: \(error.localizedDescription)*"
+                        response.update(text: combined, isError: false)
+                    }
                 }
             }
+        }
+    }
+
+    private func appendToHistory(question: String, answer: String) {
+        guard !answer.isEmpty else { return }
+        history.append(ChatMessage(role: .user, content: [.text(question)]))
+        history.append(ChatMessage(role: .assistant, content: [.text(answer)]))
+        if history.count > historyCap {
+            history.removeFirst(history.count - historyCap)
+        }
+        lastActivity = Date()
+    }
+
+    private func pruneIdleHistory() {
+        guard let last = lastActivity else { return }
+        if Date().timeIntervalSince(last) > idleResetInterval {
+            history.removeAll()
+            lastActivity = nil
         }
     }
 

@@ -7,12 +7,21 @@ import SwiftUI
 @MainActor
 final class InputOverlayController {
     private var panel: OverlayPanel?
+    private let placeholder: String
     private let onSubmit: (String) -> Void
     private let onCancel: () -> Void
+    private let onClearHistory: (() -> Void)?
 
-    init(onSubmit: @escaping (String) -> Void, onCancel: @escaping () -> Void) {
+    init(
+        placeholder: String = "Ask about your screen…",
+        onSubmit: @escaping (String) -> Void,
+        onCancel: @escaping () -> Void,
+        onClearHistory: (() -> Void)? = nil
+    ) {
+        self.placeholder = placeholder
         self.onSubmit = onSubmit
         self.onCancel = onCancel
+        self.onClearHistory = onClearHistory
     }
 
     func show() {
@@ -26,11 +35,15 @@ final class InputOverlayController {
 
         let panel = OverlayPanel(contentRect: rect, acceptsInput: true)
         let view = InputView(
+            placeholder: placeholder,
             onSubmit: { [weak self] text in
                 self?.onSubmit(text)
             },
             onCancel: { [weak self] in
                 self?.onCancel()
+            },
+            onClearHistory: { [weak self] in
+                self?.onClearHistory?()
             }
         )
         let hosting = NSHostingView(rootView: view)
