@@ -20,21 +20,21 @@ final class AssistantCoordinator {
             return
         }
 
-        let screenshot: CGImage
+        let capture: ScreenshotCapture.CaptureResult
         do {
-            screenshot = try ScreenshotCapture.captureFullScreen()
+            capture = try ScreenshotCapture.captureFocusedWindow()
         } catch {
             showError(error.localizedDescription)
             return
         }
 
-        presentInput(for: screenshot)
+        presentInput(for: capture)
     }
 
-    private func presentInput(for screenshot: CGImage) {
+    private func presentInput(for capture: ScreenshotCapture.CaptureResult) {
         let controller = InputOverlayController(
             onSubmit: { [weak self] question in
-                self?.handleSubmission(question: question, screenshot: screenshot)
+                self?.handleSubmission(question: question, capture: capture)
             },
             onCancel: { [weak self] in
                 self?.inputController?.close()
@@ -45,7 +45,7 @@ final class AssistantCoordinator {
         controller.show()
     }
 
-    private func handleSubmission(question: String, screenshot: CGImage) {
+    private func handleSubmission(question: String, capture: ScreenshotCapture.CaptureResult) {
         inputController?.close()
         inputController = nil
 
@@ -53,10 +53,21 @@ final class AssistantCoordinator {
         responseController = response
         response.show(initial: "Thinking…")
 
-        guard let imageData = ScreenshotCapture.jpegData(from: screenshot) else {
+        guard let imageData = ScreenshotCapture.jpegData(from: capture.image) else {
             response.update(text: "Failed to encode screenshot.", isError: true)
             return
         }
+
+        // OCR the full-resolution image (before JPEG re-encoding loses fidelity)
+        // so the model gets exact strings to quote back. Nil if Vision yields
+        // too little text to be worth the tokens.
+        let screenText = TextExtractor.extractText(from: capture.image)
+
+        let context = RequestContext(
+            activeApp: capture.appName,
+            activeWindowTitle: capture.windowTitle,
+            screenText: screenText
+        )
 
         Task { [weak self] in
             guard let self = self else { return }
@@ -66,7 +77,7 @@ final class AssistantCoordinator {
                     imageData: imageData,
                     imageMediaType: "image/jpeg",
                     history: self.history,
-                    context: nil
+                    context: context
                 )
                 await MainActor.run {
                     response.update(text: answer)

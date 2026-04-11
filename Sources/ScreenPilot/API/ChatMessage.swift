@@ -15,10 +15,11 @@ enum ContentBlock {
     case image(base64: String, mediaType: String)
 }
 
-/// Extra context the app can attach to a request.
-/// V1 leaves these nil; later work (active window, cursor, etc.) populates them.
+/// Extra context the app can attach to a request. Surfaced to the model as a
+/// structured header prepended to the user's question.
 struct RequestContext {
     var activeApp: String? = nil
     var activeWindowTitle: String? = nil
     var cursorLocation: CGPoint? = nil
+    var screenText: String? = nil
 }

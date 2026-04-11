@@ -49,11 +49,12 @@ final class ClaudeClient {
         }
 
         let base64 = imageData.base64EncodedString()
+        let userText = Self.buildUserText(question: question, context: context)
         let currentTurn = ChatMessage(
             role: .user,
             content: [
                 .image(base64: base64, mediaType: imageMediaType),
-                .text(question)
+                .text(userText)
             ]
         )
         let messages = history + [currentTurn]
@@ -61,7 +62,7 @@ final class ClaudeClient {
         let body: [String: Any] = [
             "model": Config.claudeModel,
             "max_tokens": Config.maxTokens,
-            "system": systemPromptIncludingContext(context),
+            "system": Config.systemPrompt,
             "messages": messages.map(Self.encode)
         ]
 
@@ -113,18 +114,28 @@ final class ClaudeClient {
         return ["role": message.role.rawValue, "content": content]
     }
 
-    private func systemPromptIncludingContext(_ context: RequestContext?) -> String {
-        // V1: just the base prompt. Future context fields get appended here
-        // without changing the call sites.
-        guard let context = context else { return Config.systemPrompt }
-        var lines = [Config.systemPrompt]
+    /// Assemble the user-facing text block: a structured context header
+    /// (active app, window title, OCR text) followed by the raw question.
+    /// Kept in the user turn rather than the system prompt so the system
+    /// prompt stays static — a prerequisite for prompt caching later.
+    private static func buildUserText(question: String, context: RequestContext?) -> String {
+        guard let context = context else { return question }
+
+        var header = ""
         if let app = context.activeApp {
-            lines.append("Active app: \(app)")
+            header += "Active app: \(app)\n"
         }
         if let title = context.activeWindowTitle {
-            lines.append("Active window: \(title)")
+            header += "Active window: \(title)\n"
         }
-        return lines.joined(separator: "\n\n")
+        if let screenText = context.screenText, !screenText.isEmpty {
+            header += "\nText extracted from the screenshot via OCR (authoritative for exact "
+            header += "strings, code, and error messages):\n"
+            header += "```\n\(screenText)\n```\n"
+        }
+
+        if header.isEmpty { return question }
+        return "\(header)\n---\n\(question)"
     }
 }
 
