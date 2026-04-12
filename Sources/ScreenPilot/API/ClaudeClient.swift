@@ -250,6 +250,15 @@ final class ClaudeClient {
             header += "strings, code, and error messages):\n"
             header += "```\n\(screenText)\n```\n"
         }
+        if let axTree = context.axTree, !axTree.isEmpty {
+            // Distinct trust level from OCR: AX is authoritative for control
+            // roles, labels, geometry, and what's selected/focused — info that
+            // pixel OCR can't recover (icon-only buttons, disabled state, etc).
+            header += "\nAccessibility tree of the active window (authoritative for control "
+            header += "roles, labels, values, and positions; one line per element as "
+            header += "`role \"label\" = \"value\" @ (x,y,w,h)`):\n"
+            header += "```\n\(axTree)\n```\n"
+        }
 
         if header.isEmpty { return question }
         return "\(header)\n---\n\(question)"

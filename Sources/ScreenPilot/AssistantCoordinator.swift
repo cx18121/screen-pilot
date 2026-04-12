@@ -7,8 +7,10 @@ import CoreGraphics
 @MainActor
 final class AssistantCoordinator {
     private let api = ClaudeClient()
+    private let locator = ElementLocationDetector()
     private var inputController: InputOverlayController?
     private var responseController: ResponseOverlayController?
+    private var highlightController: HighlightOverlayController?
 
     // Conversation memory across ⌘⇧Space presses. Stores text-only turns —
     // prior screenshots are dropped on purpose, because every new press sends
@@ -34,15 +36,16 @@ final class AssistantCoordinator {
 
         pruneIdleHistory()
 
-        let capture: ScreenshotCapture.CaptureResult
-        do {
-            capture = try ScreenshotCapture.captureFocusedWindow()
-        } catch {
-            showError(error.localizedDescription)
-            return
+        Task { @MainActor in
+            let capture: ScreenshotCapture.CaptureResult
+            do {
+                capture = try await ScreenshotCapture.captureFocusedWindow()
+            } catch {
+                showError(error.localizedDescription)
+                return
+            }
+            presentInput(for: capture)
         }
-
-        presentInput(for: capture)
     }
 
     private func presentInput(for capture: ScreenshotCapture.CaptureResult) {
@@ -72,11 +75,45 @@ final class AssistantCoordinator {
         inputController?.close()
         inputController = nil
 
+        // Any prior highlight is stale the moment a new question starts.
+        highlightController?.close()
+        highlightController = nil
+
         let response = ResponseOverlayController()
         responseController = response
         response.show(initial: "Thinking…")
 
-        guard let imageData = ScreenshotCapture.jpegData(from: capture.image) else {
+        // Fire the pointing detector in parallel with the chat stream. It runs
+        // against the full-resolution capture (not the JPEG the chat sends),
+        // because the detector does its own aspect-matched resize. Failures
+        // are swallowed inside `detect` — we never want this side-car to
+        // block or surface errors on top of the main answer.
+        let locator = self.locator
+        let screenFrame = capture.screenFrame
+        let sourceImage = capture.image
+        Task { [weak self] in
+            guard let loc = await locator.detect(question: question, image: sourceImage) else {
+                return
+            }
+            await MainActor.run {
+                guard let self = self else { return }
+                // If the user dismissed everything mid-request, don't pop a
+                // highlight onto an empty screen.
+                guard self.responseController != nil else { return }
+                self.presentHighlight(for: loc, sourceFrame: screenFrame)
+            }
+        }
+
+        // Pull the focused window's pruned AX tree before encoding the image,
+        // so we can downscale the screenshot when AX gives us a solid semantic
+        // layer to fall back on. Nil for AX-hostile apps (Electron, games).
+        let axTree = capture.pid.flatMap { AXExtractor.extractTree(forPID: $0) }
+
+        // When AX is carrying the structural load, 1024px is still legible
+        // for any remaining visual judgement and saves ~400 image tokens.
+        // Without AX, keep the 1280px default so OCR + pixels stay sharp.
+        let imageMaxDim: CGFloat = axTree != nil ? 1024 : 1280
+        guard let imageData = ScreenshotCapture.jpegData(from: capture.image, maxDimension: imageMaxDim) else {
             response.update(text: "Failed to encode screenshot.", isError: true)
             return
         }
@@ -89,7 +126,8 @@ final class AssistantCoordinator {
         let context = RequestContext(
             activeApp: capture.appName,
             activeWindowTitle: capture.windowTitle,
-            screenText: screenText
+            screenText: screenText,
+            axTree: axTree
         )
 
         let historySnapshot = history
@@ -161,5 +199,30 @@ final class AssistantCoordinator {
         inputController = nil
         responseController?.close()
         responseController = nil
+        highlightController?.close()
+        highlightController = nil
+    }
+
+    /// Map a detector coordinate (in resized-image pixel space) onto the
+    /// global screen and show a click-through ring there. `sourceFrame` is the
+    /// region the capture covered, in CG global points — dividing by the
+    /// declared dimensions gives us a scale-independent fraction of that
+    /// region.
+    private func presentHighlight(
+        for location: ElementLocationDetector.DetectedLocation,
+        sourceFrame: CGRect
+    ) {
+        guard location.declaredWidth > 0, location.declaredHeight > 0 else { return }
+        let ratioX = location.point.x / CGFloat(location.declaredWidth)
+        let ratioY = location.point.y / CGFloat(location.declaredHeight)
+        let cgPoint = CGPoint(
+            x: sourceFrame.origin.x + ratioX * sourceFrame.width,
+            y: sourceFrame.origin.y + ratioY * sourceFrame.height
+        )
+
+        highlightController?.close()
+        let highlight = HighlightOverlayController()
+        highlight.show(atCGPoint: cgPoint)
+        highlightController = highlight
     }
 }

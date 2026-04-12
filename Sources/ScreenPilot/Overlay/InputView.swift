@@ -7,15 +7,22 @@ struct InputView: View {
     let onClearHistory: () -> Void
 
     @State private var text: String = ""
+    @State private var isRecording: Bool = false
+    @State private var voiceError: String? = nil
     @FocusState private var focused: Bool
+
+    // Owned here so its lifetime matches the overlay. When the overlay closes,
+    // SwiftUI drops the view and the recognizer deinits, stopping the engine.
+    @State private var recognizer = SpeechRecognizer()
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "sparkles")
+            Image(systemName: isRecording ? "waveform" : "sparkles")
                 .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(isRecording ? Color.red.opacity(0.9) : .white.opacity(0.7))
+                .symbolEffect(.pulse, options: .repeating, isActive: isRecording)
 
-            TextField(placeholder, text: $text)
+            TextField(voiceError ?? placeholder, text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 16))
                 .foregroundStyle(.white)
@@ -33,6 +40,22 @@ struct InputView: View {
             }
             .buttonStyle(.plain)
             .keyboardShortcut("k", modifiers: [.command])
+
+            // ⌘M toggles voice capture. Click-target is the mic button below.
+            Button(action: toggleRecording) {
+                Color.clear.frame(width: 0, height: 0)
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("m", modifiers: [.command])
+
+            Button(action: toggleRecording) {
+                Image(systemName: isRecording ? "stop.circle.fill" : "mic.fill")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(isRecording ? Color.red.opacity(0.9) : .white.opacity(0.5))
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .help(isRecording ? "Stop recording (⌘M)" : "Voice input (⌘M)")
 
             if !text.isEmpty {
                 Text("↵")
@@ -66,8 +89,42 @@ struct InputView: View {
     }
 
     private func submit() {
+        if isRecording { stopRecording() }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         onSubmit(trimmed)
+    }
+
+    private func toggleRecording() {
+        if isRecording {
+            stopRecording()
+        } else {
+            startRecording()
+        }
+    }
+
+    private func startRecording() {
+        voiceError = nil
+        PermissionsManager.ensureSpeech { granted in
+            guard granted else {
+                voiceError = "Voice input needs Speech + Microphone permission"
+                return
+            }
+            recognizer.start(
+                onPartialResult: { transcript in
+                    text = transcript
+                },
+                onError: { error in
+                    voiceError = error.localizedDescription
+                    isRecording = false
+                }
+            )
+            isRecording = recognizer.isRecording
+        }
+    }
+
+    private func stopRecording() {
+        recognizer.stop()
+        isRecording = false
     }
 }

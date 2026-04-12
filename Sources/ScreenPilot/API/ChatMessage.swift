@@ -22,4 +22,8 @@ struct RequestContext {
     var activeWindowTitle: String? = nil
     var cursorLocation: CGPoint? = nil
     var screenText: String? = nil
+    /// Pruned AX tree of the focused window. Different trust level from OCR —
+    /// authoritative for control roles, labels, and geometry; not always
+    /// available (Electron without AX, games, etc.). See AXExtractor.
+    var axTree: String? = nil
 }

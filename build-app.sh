@@ -66,6 +66,10 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
     <string>ScreenPilot captures your screen so it can answer questions about what you're looking at.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>ScreenPilot uses system events for its global hotkey.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>ScreenPilot uses the microphone to transcribe voice questions about your screen.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>ScreenPilot transcribes your spoken questions so you can ask about your screen hands-free.</string>
 </dict>
 </plist>
 EOF

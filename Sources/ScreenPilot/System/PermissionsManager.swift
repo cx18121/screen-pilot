@@ -1,6 +1,8 @@
 import AppKit
 import ApplicationServices
+import AVFoundation
 import CoreGraphics
+import Speech
 
 enum PermissionsManager {
     @discardableResult
@@ -37,6 +39,37 @@ enum PermissionsManager {
             openPaneURL: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
         )
         return false
+    }
+
+    /// Request Speech Recognition + Microphone together. Both are needed for
+    /// SFSpeechRecognizer to work; returns true only if the caller can safely
+    /// start the audio engine right now. Triggers the system prompts on first
+    /// call; subsequent calls only nag if the user denied.
+    static func ensureSpeech(completion: @escaping (Bool) -> Void) {
+        SFSpeechRecognizer.requestAuthorization { speechStatus in
+            AVCaptureDevice.requestAccess(for: .audio) { micGranted in
+                DispatchQueue.main.async {
+                    let speechOK = speechStatus == .authorized
+                    if speechOK && micGranted {
+                        completion(true)
+                        return
+                    }
+                    let denied = (speechStatus == .denied || speechStatus == .restricted) || !micGranted
+                    if denied {
+                        showAlert(
+                            title: "Speech Recognition Required",
+                            message: """
+                            ScreenPilot needs Speech Recognition and Microphone permission for voice input.
+
+                            Enable both in System Settings → Privacy & Security, then try again.
+                            """,
+                            openPaneURL: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
+                        )
+                    }
+                    completion(false)
+                }
+            }
+        }
     }
 
     private static func showAlert(title: String, message: String, openPaneURL: String) {

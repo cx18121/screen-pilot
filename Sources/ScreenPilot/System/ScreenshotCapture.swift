@@ -1,10 +1,12 @@
 import AppKit
 import CoreGraphics
+import ScreenCaptureKit
 
 enum ScreenshotCapture {
     enum CaptureError: LocalizedError {
         case permissionDenied
         case captureFailed
+        case noDisplayAvailable
 
         var errorDescription: String? {
             switch self {
@@ -19,6 +21,8 @@ enum ScreenshotCapture {
                 """
             case .captureFailed:
                 return "Screen capture failed."
+            case .noDisplayAvailable:
+                return "No display available for capture."
             }
         }
     }
@@ -29,97 +33,140 @@ enum ScreenshotCapture {
         let image: CGImage
         let appName: String?
         let windowTitle: String?
+        /// PID of the frontmost application at capture time. Used by the AX
+        /// extractor to pull the focused window's accessibility tree — we
+        /// stash it here so the coordinator doesn't have to re-query
+        /// NSWorkspace and race with app switches.
+        let pid: pid_t?
+        /// Region the image covers, in the window server's global coordinate
+        /// system (top-left origin, points). Needed to map Computer-Use-returned
+        /// coordinates back onto the physical screen for the highlight overlay.
+        let screenFrame: CGRect
     }
 
     /// Captures the frontmost window of the active application, with metadata.
     /// Falls back to full-screen capture if no suitable window is found (e.g.
     /// Finder desktop, fullscreen game). Menu bar, dock, and other apps'
     /// windows are excluded — the model sees only what the user is focused on.
-    static func captureFocusedWindow() throws -> CaptureResult {
+    static func captureFocusedWindow() async throws -> CaptureResult {
         guard CGPreflightScreenCaptureAccess() else {
             throw CaptureError.permissionDenied
         }
 
-        guard let frontApp = NSWorkspace.shared.frontmostApplication else {
-            return CaptureResult(image: try captureFullScreen(), appName: nil, windowTitle: nil)
+        let frontApp = NSWorkspace.shared.frontmostApplication
+        let frontPID = frontApp?.processIdentifier
+        let appName = frontApp?.localizedName
+
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(
+                false,
+                onScreenWindowsOnly: true
+            )
+        } catch {
+            throw CaptureError.permissionDenied
         }
-        let frontPID = frontApp.processIdentifier
-        let appName = frontApp.localizedName
 
-        let infoList = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements],
-            kCGNullWindowID
-        ) as? [[String: Any]] ?? []
-
-        // CGWindowListCopyWindowInfo returns windows in front-to-back z-order.
-        // We want the topmost normal-layer window owned by the frontmost app
-        // that is big enough to be a real content window (not a tooltip/menu).
-        let target = infoList.first { info in
-            guard let pid = info[kCGWindowOwnerPID as String] as? pid_t, pid == frontPID else {
+        // SCShareableContent.windows is documented to be in front-to-back
+        // z-order. Pick the topmost normal-layer window owned by the frontmost
+        // app that's big enough to be real content (not a tooltip/menu).
+        let target = content.windows.first { window in
+            guard let pid = frontPID,
+                  window.owningApplication?.processID == pid else {
                 return false
             }
-            if let layer = info[kCGWindowLayer as String] as? Int, layer != 0 {
-                return false
-            }
-            if let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
-               let w = bounds["Width"], let h = bounds["Height"],
-               w < 200 || h < 200 {
-                return false
-            }
+            if window.windowLayer != 0 { return false }
+            if window.frame.width < 200 || window.frame.height < 200 { return false }
             return true
         }
 
-        guard let info = target,
-              let windowID = info[kCGWindowNumber as String] as? CGWindowID,
-              let boundsDict = info[kCGWindowBounds as String] as? [String: CGFloat] else {
-            return CaptureResult(image: try captureFullScreen(), appName: appName, windowTitle: nil)
+        guard let window = target else {
+            let (image, frame) = try await captureDisplay(content: content)
+            return CaptureResult(
+                image: image,
+                appName: appName,
+                windowTitle: nil,
+                pid: frontPID,
+                screenFrame: frame
+            )
         }
 
-        let rect = CGRect(
-            x: boundsDict["X"] ?? 0,
-            y: boundsDict["Y"] ?? 0,
-            width: boundsDict["Width"] ?? 0,
-            height: boundsDict["Height"] ?? 0
-        )
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let config = makeConfiguration(for: filter)
 
-        guard let image = CGWindowListCreateImage(
-            rect,
-            .optionIncludingWindow,
-            windowID,
-            [.bestResolution, .boundsIgnoreFraming]
-        ) else {
+        let image: CGImage
+        do {
+            image = try await SCScreenshotManager.captureImage(
+                contentFilter: filter,
+                configuration: config
+            )
+        } catch {
             throw CaptureError.captureFailed
         }
 
-        // kCGWindowName is only populated when Screen Recording permission is
+        // SCWindow.title is only populated when Screen Recording permission is
         // granted (which we've already preflighted). Empty titles are common
         // for windows that don't set one — treat those as nil.
-        let rawTitle = info[kCGWindowName as String] as? String
+        let rawTitle = window.title
         let windowTitle = (rawTitle?.isEmpty == false) ? rawTitle : nil
 
-        return CaptureResult(image: image, appName: appName, windowTitle: windowTitle)
+        return CaptureResult(
+            image: image,
+            appName: appName,
+            windowTitle: windowTitle,
+            pid: frontPID,
+            screenFrame: window.frame
+        )
     }
 
-    /// Captures the entire screen as a CGImage using CGWindowListCreateImage.
+    /// Captures the entire primary display as a CGImage.
     ///
-    /// `CGWindowListCreateImage` is a silent failure mode: without Screen Recording
-    /// permission it returns a non-nil image containing only the desktop wallpaper
-    /// and menu bar (every other app's window is masked out). We preflight the
-    /// permission explicitly so we can surface a useful error instead of sending
-    /// a wallpaper screenshot to Claude.
-    static func captureFullScreen() throws -> CGImage {
+    /// We preflight Screen Recording permission explicitly so we can surface a
+    /// useful error instead of silently sending a wallpaper-only screenshot
+    /// (ScreenCaptureKit would throw, but the preflight message is clearer).
+    static func captureFullScreen() async throws -> CGImage {
         guard CGPreflightScreenCaptureAccess() else {
             throw CaptureError.permissionDenied
         }
-        guard let image = CGWindowListCreateImage(
-            .infinite,
-            .optionOnScreenOnly,
-            kCGNullWindowID,
-            [.bestResolution]
-        ) else {
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(
+                false,
+                onScreenWindowsOnly: true
+            )
+        } catch {
+            throw CaptureError.permissionDenied
+        }
+        let (image, _) = try await captureDisplay(content: content)
+        return image
+    }
+
+    private static func captureDisplay(content: SCShareableContent) async throws -> (CGImage, CGRect) {
+        guard let display = content.displays.first else {
+            throw CaptureError.noDisplayAvailable
+        }
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let config = makeConfiguration(for: filter)
+        do {
+            let image = try await SCScreenshotManager.captureImage(
+                contentFilter: filter,
+                configuration: config
+            )
+            return (image, display.frame)
+        } catch {
             throw CaptureError.captureFailed
         }
-        return image
+    }
+
+    private static func makeConfiguration(for filter: SCContentFilter) -> SCStreamConfiguration {
+        let config = SCStreamConfiguration()
+        // contentRect is in points; multiply by pointPixelScale to get native
+        // pixel dimensions — equivalent to the old .bestResolution flag.
+        let scale = CGFloat(filter.pointPixelScale)
+        config.width = max(1, Int(filter.contentRect.width * scale))
+        config.height = max(1, Int(filter.contentRect.height * scale))
+        config.showsCursor = false
+        return config
     }
 
     /// Downscale (to `maxDimension` on the long edge) and JPEG-encode a CGImage.
