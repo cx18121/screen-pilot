@@ -75,19 +75,8 @@ AppKit runs the plumbing (windows, event taps, permissions). SwiftUI renders the
 
 ## Built for expansion, not built yet
 
-The shape of v1 is deliberate. These are wired in but not implemented:
-
 - **Voice input.** Input enters through `InputOverlayController`. A `VoiceOverlayController` would satisfy the same contract (`onSubmit(String)`). The coordinator doesn't care which one fed it text.
 - **Conversation memory.** `ClaudeClient.ask` already takes a `history: [ChatMessage]` array. V1 passes `[]` each call; wiring persistent session history is a field on `AssistantCoordinator`.
 - **Active app / window context.** `ClaudeClient.ask` accepts a `RequestContext?` struct. Populating it (via `NSWorkspace.shared.frontmostApplication`, AX APIs, etc.) and passing it through is an additive change.
 - **Pointing / highlighting.** `OverlayPanel` is the shared base for any floating layer. A `HighlightOverlayController` can sit alongside the input/response ones and draw boxes/arrows on screen coordinates Claude returns.
 - **Automation / click actions.** These go in a new module (`Automation/`) and are triggered by the coordinator, not the client. The API layer stays pure.
-
-Nothing in v1 blocks any of these — the boundaries are already there.
-
-## Known limits (v1)
-
-- `CGWindowListCreateImage` is the API specified; on macOS 14+ Apple prefers ScreenCaptureKit. It still works, but that's the long-term replacement.
-- No hotkey customization.
-- No retry / rate-limit handling beyond surfacing the error text.
-- Each trigger is an independent conversation — no memory across presses.
